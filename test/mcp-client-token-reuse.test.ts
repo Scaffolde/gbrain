@@ -162,6 +162,13 @@ describe('thin-client token reuse across processes', () => {
     expect(existsSync(tokenFilePath())).toBe(false); // the next process will not present tok-1
   });
 
+  test('listRemoteTools forgets a refreshed token the server also rejects', async () => {
+    mcp401 = 2;
+    await expect(listRemoteTools(config())).rejects.toBeDefined();
+    expect(mints).toBe(2);
+    expect(existsSync(tokenFilePath())).toBe(false);
+  });
+
   test('the record is 0600, written without leftovers, and holds no secret', async () => {
     await callRemoteTool(config(), 'get_brain_identity');
     expect(statSync(tokenFilePath()).mode & 0o777).toBe(0o600);

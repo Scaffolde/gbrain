@@ -621,7 +621,13 @@ export async function listRemoteTools(config: GBrainConfig, opts: CallRemoteTool
       signal.throwIfAborted();
       if (!isStreamableHttpError(e) || e.code !== 401) throw e;
       forgetToken(remote, token);
-      return await list(await getAccessToken(config, true, signal));
+      const fresh = await getAccessToken(config, true, signal);
+      try {
+        return await list(fresh);
+      } catch (e2) {
+        if (isStreamableHttpError(e2) && e2.code === 401) forgetToken(remote, fresh);
+        throw e2;
+      }
     }
   } catch (e) {
     throw toRemoteMcpError(e, remote.mcp_url, signal);
