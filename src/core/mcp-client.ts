@@ -124,6 +124,13 @@ function sharesTokenOnDisk(remote: NonNullable<GBrainConfig['remote_mcp']>): boo
   return !process.env.GBRAIN_REMOTE_CLIENT_SECRET && Boolean(remote.oauth_client_secret);
 }
 
+/** Forget a token the server rejected: the in-process entry and, when it is
+ *  shared, the on-disk record (only if it still holds `rejected`). */
+function forgetToken(remote: NonNullable<GBrainConfig['remote_mcp']>, rejected: string): void {
+  tokenCache.delete(cacheKey(remote.mcp_url, remote.oauth_client_id));
+  if (sharesTokenOnDisk(remote)) dropTokenFile(remote.mcp_url, remote.oauth_client_id, rejected);
+}
+
 /**
  * Test-only escape hatch. Tests that mock the OAuth fixture across multiple
  * runs need to invalidate the cache between runs. Production callers should
@@ -537,8 +544,7 @@ export async function callRemoteTool(
       if (!isStreamableHttpError(e) || e.code !== 401) throw e;
       submitted = false; // This attempt was explicitly refused, not accepted.
       // Drop cached token (here and on disk) and retry once with a fresh mint.
-      tokenCache.delete(cacheKey(remote.mcp_url, remote.oauth_client_id));
-      if (sharesTokenOnDisk(remote)) dropTokenFile(remote.mcp_url, remote.oauth_client_id, initialToken);
+      forgetToken(remote, initialToken);
       let freshToken: string;
       try {
         freshToken = await getAccessToken(config, true, signal);
@@ -559,7 +565,7 @@ export async function callRemoteTool(
         signal.throwIfAborted();
         if (isStreamableHttpError(e2) && e2.code === 401) {
           submitted = false;
-          tokenCache.delete(remote.mcp_url);
+          forgetToken(remote, freshToken);
           throw new RemoteMcpError(
             'auth_after_refresh',
             `Auth failed after token refresh. Verify oauth_client_id and secret are still valid; the host operator may need to re-run \`gbrain auth register-client\`.`,
@@ -608,12 +614,13 @@ export async function listRemoteTools(config: GBrainConfig, opts: CallRemoteTool
     }
   };
   try {
+    const token = await getAccessToken(config, false, signal);
     try {
-      return await list(await getAccessToken(config, false, signal));
+      return await list(token);
     } catch (e) {
       signal.throwIfAborted();
       if (!isStreamableHttpError(e) || e.code !== 401) throw e;
-      tokenCache.delete(remote.mcp_url);
+      forgetToken(remote, token);
       return await list(await getAccessToken(config, true, signal));
     }
   } catch (e) {

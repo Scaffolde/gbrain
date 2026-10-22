@@ -16,7 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test as testRaw } fr
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { callRemoteTool, tokenFilePath, _clearMcpClientTokenCache } from '../src/core/mcp-client.ts';
+import { callRemoteTool, listRemoteTools, tokenFilePath, _clearMcpClientTokenCache } from '../src/core/mcp-client.ts';
 import { configPath, loadConfig } from '../src/core/config.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -24,6 +24,8 @@ import { withEnv } from './helpers/with-env.ts';
 let server: ReturnType<typeof Bun.serve>;
 let port: number;
 let mints = 0;
+/** When set, /token answers 500 instead of minting. */
+let tokenDown = false;
 let expiresIn = 3600;
 /** Upcoming /mcp POSTs that answer 401 before the fixture recovers. */
 let mcp401 = 0;
@@ -52,6 +54,7 @@ beforeAll(() => {
       return Response.json({ issuer: `http://127.0.0.1:${port}`, token_endpoint: `http://127.0.0.1:${port}/token` });
     }
     if (path === '/token') {
+      if (tokenDown) return new Response('down', { status: 500 });
       mints++;
       return Response.json({ access_token: `tok-${mints}`, token_type: 'bearer', expires_in: expiresIn, scope: 'read write admin' });
     }
@@ -65,7 +68,8 @@ beforeAll(() => {
       if (body.method === 'tools/call') bearers.push((req.headers.get('authorization') ?? '').replace(/^Bearer /, ''));
       const result = body.method === 'initialize'
         ? { protocolVersion: body.params?.protocolVersion ?? '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'token-reuse-fixture', version: '1' } }
-        : body.method === 'tools/call' ? { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] } : {};
+        : body.method === 'tools/call' ? { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] }
+        : body.method === 'tools/list' ? { tools: [] } : {};
       return Response.json({ jsonrpc: '2.0', id: body.id, result });
     }
     return new Response(null, { status: path === '/mcp' ? 405 : 404 });
@@ -77,6 +81,7 @@ afterAll(async () => { await server.stop(true); });
 
 beforeEach(() => {
   mints = 0;
+  tokenDown = false;
   expiresIn = 3600;
   mcp401 = 0;
   bearers = [];
@@ -136,6 +141,25 @@ describe('thin-client token reuse across processes', () => {
     await callRemoteTool(config(), 'get_brain_identity');
     expect(mints).toBe(2);
     expect(JSON.parse(readFileSync(tokenFilePath(), 'utf-8')).access_token).toBe('tok-2');
+  });
+
+  test('a second 401 after the refresh forgets the refreshed token too', async () => {
+    mcp401 = 2;
+    await expect(callRemoteTool(config(), 'get_brain_identity')).rejects.toMatchObject({ reason: 'auth_after_refresh' });
+    expect(mints).toBe(2);
+    expect(existsSync(tokenFilePath())).toBe(false);
+    await callRemoteTool(config(), 'get_brain_identity');
+    expect(mints).toBe(3); // the rejected tok-2 is not presented again
+    expect(bearers).toEqual(['tok-3']);
+  });
+
+  test('listRemoteTools on a 401 drops the shared token even when the re-mint fails', async () => {
+    await callRemoteTool(config(), 'get_brain_identity');
+    newProcess();
+    mcp401 = 1;
+    tokenDown = true;
+    await expect(listRemoteTools(config())).rejects.toMatchObject({ reason: 'token' });
+    expect(existsSync(tokenFilePath())).toBe(false); // the next process will not present tok-1
   });
 
   test('the record is 0600, written without leftovers, and holds no secret', async () => {
